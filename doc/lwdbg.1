@@ -1,0 +1,236 @@
+.\" lwdbg(1) — mdoc, not man macros: it is the native format on the BSDs and
+.\" GNU groff renders it without complaint.
+.Dd November 3, 2026
+.Dt LWDBG 1
+.Os
+.Sh NAME
+.Nm lwdbg
+.Nd measure, debug and control browsers through a caching proxy and a correlated debug store
+.Sh SYNOPSIS
+.Nm
+.Op Fl -home Ar dir
+.Op Fl -json
+.Ar command
+.Op Ar arguments
+.Sh DESCRIPTION
+.Nm
+measures and debugs web page loads.
+It has two things no single-browser tool
+has: a proxy every engine can be pointed at, and a store that correlates every
+signal under one trace id.
+.Pp
+The proxy is the backbone because it is the only engine-agnostic layer.
+It
+reaches Gecko, Blink, WebKit and Goanna alike, including Pale Moon and
+Basilisk where no extension can be installed at all.
+Gecko browsers
+additionally support Marionette, the DevTools remote protocol and WebDriver
+BiDi, and an extension that can act on a session already running.
+.Pp
+Two rules are built into the tool because ignoring either produces confident
+nonsense:
+.Bl -enum -width 2n
+.It
+Measurements default to three runs and report the median with the spread.
+A
+single observation is not a property of a server; the origin this tool was
+built against was measured swinging from 0.22 s to a 180 s timeout.
+.It
+A browser measurement is worth nothing without a non-browser baseline.
+.Ic lwdbg measure --via curl
+is the anchor.
+If the two disagree by much more than 20% on TTFB, the browser
+path is instrumented wrong and nothing downstream is trustworthy.
+.El
+.Sh GLOBAL OPTIONS
+.Bl -tag -width "--home dir"
+.It Fl -home Ar dir
+Store directory holding the SQLite database, the content-addressed blobs and
+the local CA.
+Defaults to
+.Ev LWDBG_HOME ,
+else
+.Pa ~/.local/share/lwdbg .
+.It Fl -json
+Machine-readable output.
+Use it whenever another program or agent consumes the
+result.
+.El
+.Sh COMMANDS
+.Bl -tag -width "adapters"
+.It Ic doctor
+What works on this machine and what is missing, with a remedy for each gap.
+The first call in an unfamiliar environment.
+.It Ic detect
+Installed browsers, their engines, and which transports each can actually use.
+Resolves symlinks, so a browser installed on another volume is reported at its
+real location.
+.It Ic proxy Cm start Ns | Ns Cm ca-export Ns | Ns Cm ca-install Ns | Ns Cm ca-uninstall
+Run the intercepting cache, or manage its certificate authority.
+.Fl -only-host
+restricts interception to the named hosts and their subdomains; everything
+else is tunnelled without being decrypted.
+.It Ic measure Ar url
+Three runs and a median.
+.Fl -via
+selects
+.Cm curl ,
+.Cm marionette ,
+.Cm bidi
+or
+.Cm rdp ;
+anything but
+.Cm curl
+needs
+.Fl -browser .
+.It Ic launch
+Start a browser with debug transports enabled, in a scratch profile this tool
+created.
+It refuses any profile directory it did not create.
+.It Ic attach
+Connect to a transport that is already listening and report what is there.
+.It Ic eval Ar script
+Run JavaScript in a browser reached over a transport.
+Pairs with
+.Ic launch
+to drive a session by hand.
+.It Ic live
+Act on a browser that is already running, through the extension bridge.
+Commands that change state are refused unless
+.Fl -allow-write
+is given.
+.It Ic parity
+Compare how browsers render the same URL, on the GPU where one is available
+and on the CPU always.
+The CPU path is the reference implementation.
+.It Ic android
+Android Firefox over
+.Xr adb 1 :
+socket discovery, port forwarding, real multitouch input and screen capture.
+.It Ic vantage Ar url
+Measure the same target from other machines over ssh.
+Two or more vantage
+points are what separates a slow origin from a slow route.
+.It Ic logs Cm modules Ns | Ns Cm ingest
+What
+.Ev MOZ_LOG
+can collect, and how to fold a log file into the store.
+.It Ic ssot Cm traces Ns | Ns Cm trace Ns | Ns Cm compression
+Query the store.
+.Cm compression
+answers whether compression actually applied, from recorded wire and decoded
+byte counts rather than from a header.
+.It Ic adapters Cm list Ns | Ns Cm install Ns | Ns Cm emit Ns | Ns Cm uninstall
+Wire this tool into the agent harnesses on this machine from one canonical
+source.
+A path that was inferred rather than observed is reported as such.
+.El
+.Pp
+.Ic lwdbg Ar command Fl h
+is the authoritative syntax for each.
+This page is the map, not the manual.
+.Sh ENVIRONMENT
+.Bl -tag -width LWDBG_SKILL
+.It Ev LWDBG_HOME
+Store directory.
+Overridden by
+.Fl -home .
+.It Ev LWDBG_SKILL
+Directory holding
+.Pa SKILL.md
+and
+.Pa references/ .
+Searched first; then the directory baked in at build time by
+.Ic make install ;
+then paths relative to the executable; then the current directory.
+.It Ev LWDBG_LOG
+Tracing filter, in
+.Xr env_logger 3
+syntax, e.g.
+.Li lwdbg_proxy=debug .
+Diagnostics go to standard error.
+.El
+.Sh FILES
+.Bl -tag -width "~/.local/share/lwdbg/store/live.sock" -compact
+.It Pa ~/.local/share/lwdbg/store/
+SQLite database and content-addressed blobs.
+.It Pa ~/.local/share/lwdbg/ca/
+Local certificate authority.
+The private key is mode 0600.
+.It Pa ~/.local/share/lwdbg/store/live.sock
+Socket the extension bridge listens on, mode 0600.
+.It Pa PREFIX/share/lwdbg/skills/librewolf-debugger/
+Installed skill and reference tree.
+.It Pa PREFIX/share/lwdbg/extension/
+The WebExtension, to load through
+.Pa about:debugging .
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Ic doctor
+exits non-zero when a required tool is missing, having printed every check
+first rather than stopping at the first failure.
+.Sh SEE ALSO
+.Xr adb 1 ,
+.Xr certutil 1 ,
+.Xr curl 1 ,
+.Xr ssh 1
+.Pp
+.Pa PREFIX/share/lwdbg/skills/librewolf-debugger/references/
+holds the long-form notes: engine and transport matrices, the LibreWolf
+specifics, proxy and CA mechanics, logging, parity, Android, vantage hosts,
+building and packaging.
+.Sh CAVEATS
+On LibreWolf the DevTools remote protocol cannot be enabled at all.
+Its
+.Pa librewolf.cfg
+forces
+.Li devtools.debugger.remote-enabled
+false with a plain
+.Fn pref
+call, and AutoConfig is applied after
+.Pa user.js ,
+so no user preference can override it.
+.Fl -start-debugger-server
+is then accepted and silently does nothing.
+Marionette and WebDriver BiDi
+both work; consequently a LibreWolf instance that is already running is
+reachable only through the extension bridge or the proxy.
+.Sh SECURITY CONSIDERATIONS
+.Bl -bullet
+.It
+A proxy with a trusted CA sees
+.Em all
+traffic from any browser pointed at it, credentials and session cookies
+included.
+Scope every capture with
+.Fl -only-host ,
+and do not leave a capture-all proxy running after the task.
+.It
+Tor Browser is refused unless
+.Fl -force-tor
+is given.
+A local interception breaks its threat model.
+.It
+.Ic live
+acts on the user's real session, with their logins in it.
+The host refuses a
+state-changing command without
+.Fl -allow-write ,
+and the refusal happens before anything reaches the browser.
+That is a
+mechanism, not a substitute for asking: approval for one action is not
+approval for the next.
+.It
+.Ic launch
+writes
+.Li devtools.debugger.prompt-connection=false
+and
+.Li privacy.resistFingerprinting=false
+into its profile.
+Both would remove protections from a profile somebody
+browses with, so it refuses any directory it did not create.
+.It
+Remove the CA when the work is done:
+.Ic lwdbg proxy ca-uninstall --profile Ar dir .
+.El

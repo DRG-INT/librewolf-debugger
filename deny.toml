@@ -1,0 +1,73 @@
+# cargo-deny policy.
+#
+# The point of this file is that the licence position is *stated* rather than
+# assumed. A dependency whose licence is not on the allow list fails the build
+# and gets an explicit, reasoned exception here or gets removed.
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisories are a hard failure: this crate terminates TLS and parses
+# attacker-influenced bytes, so an unpatched advisory in that path is not a
+# warning.
+yanked = "deny"
+ignore = [
+    # paste 1.0.15 — unmaintained, and the advisory itself says "No safe
+    # upgrade is available". It arrives only as
+    #   paste <- metal <- wgpu-hal <- wgpu <- lwdbg-gpu
+    # so it is: a compile-time-only proc macro with no runtime surface, in the
+    # macOS Metal backend, inside a feature that is off for every non-macOS
+    # build. There is nothing to patch and nothing it can be reached through.
+    # Revisit when wgpu moves to `pastey`.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+# Permissive only. Nothing here links anything copyleft, and a release that
+# accidentally did would be a licence problem for every downstream user.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+# Exceptions, each with the reason it is acceptable rather than a bare name.
+[[licenses.exceptions]]
+# ring ships its own licence text that is OpenSSL-derived plus ISC; it is
+# permissive, but the expression is not a clean SPDX one, so it is named here
+# instead of loosening the allow list for everything.
+name = "ring"
+allow = ["ISC", "MIT", "OpenSSL"]
+
+[[licenses.exceptions]]
+# webpki-roots embeds Mozilla's CA bundle, which is MPL-2.0 data rather than
+# linked code.
+name = "webpki-roots"
+allow = ["MPL-2.0", "CDLA-Permissive-2.0"]
+
+[[licenses.clarify]]
+name = "ring"
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# A duplicate of either of these would mean two TLS stacks or two SQLite
+# builds in one binary, which is a real bug rather than bloat.
+deny = []
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

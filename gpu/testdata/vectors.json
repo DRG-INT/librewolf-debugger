@@ -1,0 +1,35 @@
+{
+  "$comment": [
+    "Golden vectors asserted by BOTH gpu/tests/golden_vectors.rs and",
+    "gpu/js/parity.test.mjs. Neither side owns these numbers, so a drift in",
+    "either is caught and a change has to be made here deliberately.",
+    "",
+    "Patterns are the helpers in gpu/src/cpu.rs tests: checker fills 20 and",
+    "230 in size-pixel cells; solid fills one value.",
+    "",
+    "The pHash values depend on gpu/testdata/dct-cos-8x32.json. They are",
+    "bit-identical across the two languages only because that table is",
+    "shared: V8 bundles its own fdlibm for Math.cos, and computing the",
+    "cosines on each side made the two disagree on 3 of 64 bits here."
+  ],
+  "ssim": {
+    "identical_checker64_4": 1,
+    "inverted_checker64_4": -0.9939414703213028,
+    "shifted_one_px_checker64_8": 0.010509787183331376,
+    "perturbed_region_128_8": 0.8928372774944464,
+    "solid_10_vs_240": 0.08329221650541027
+  },
+  "phash": {
+    "checker128_8": "141515fe15fa156a",
+    "checker128_32": "1a1b1be4e4e0e56a",
+    "checker128_8_plus10": "141515fe15fe1562"
+  },
+  "hamming": {
+    "checker8_vs_checker32": 24,
+    "brightness_shift_10": 2
+  },
+  "image": {
+    "resize_2x2_to_1x1_of_0_0_200_200": 100,
+    "luma_rec709_of_rgb_128_64_32": 75
+  }
+}

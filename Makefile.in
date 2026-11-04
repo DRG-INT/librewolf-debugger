@@ -1,0 +1,533 @@
+# lwdbg — generated from Makefile.in by ./configure. Do not edit Makefile.
+#
+# POSIX make only, because this has to run under both bmake (FreeBSD, NetBSD)
+# and the GNU make 3.81 that macOS still ships:
+#
+#   * macros assigned with `=` only. No `:=`, `?=`, `+=`. Overriding is done
+#     the POSIX way, on the command line: `make PREFIX=/opt install`.
+#   * no `ifeq`/`ifdef`, no `$(shell ...)`, no `%` pattern rules. Every
+#     conditional lives in a recipe, run by sh.
+#   * no install(1). POSIX does not specify it, and GNU's `install -D` does
+#     not exist on FreeBSD. mkdir -p, cp and chmod are used instead.
+#   * .PHONY is used: it was standardised in POSIX Issue 8, and both bmake and
+#     GNU make have honoured it for decades.
+
+.POSIX:
+
+# ------------------------------------------------------------------- paths
+
+PREFIX      = @PREFIX@
+BINDIR      = @BINDIR@
+DATAROOTDIR = @DATAROOTDIR@
+MANDIR      = @MANDIR@
+SYSCONFDIR  = @SYSCONFDIR@
+PKGDATADIR  = @DATAROOTDIR@/lwdbg
+
+DESTDIR     =
+
+SRCDIR      = @SRCDIR@
+TARGET_DIR  = @TARGET_DIR@
+# Overridable on the command line, which is the POSIX way:
+#   make CARGO_PROFILE=release-lean
+# `release-lean` gives up LTO and splits codegen, for a machine that cannot
+# afford the release link. ./configure warns when that is this machine.
+CARGO_PROFILE = release
+HOST_PREFIX = @HOST_PREFIX@
+BUILT       = @TARGET_DIR@/@HOST_PREFIX@$(CARGO_PROFILE)
+EXE         = @EXE@
+
+# --------------------------------------------------------------- toolchain
+
+CARGO          = @CARGO@
+CARGO_FEATURES = @CARGO_FEATURES@
+HOST_FLAG      = @HOST_FLAG@
+STRIP          = @STRIP@
+UNAME          = @UNAME@
+GPU            = @GPU@
+
+# The build is told where its data will live, so the installed binary finds
+# its skill tree without LWDBG_SKILL being set. cli/build.rs bakes this in and
+# declares rerun-if-env-changed, so re-running configure with a different
+# --prefix rebuilds instead of silently keeping the old path.
+CARGO_ENV = LWDBG_DATADIR=$(PKGDATADIR)
+
+GPU_BIN = @GPU_BIN@
+GPU_PKG = @GPU_PKG@
+
+# Two invocations, deliberately.
+#
+# cargo unifies features across one invocation, so building lwdbg and
+# lwdbg-gpu together would resolve lwdbg-gpu *once*, with the gpu feature on,
+# and lwdbg would link wgpu through it. Separate invocations resolve
+# separately, which is the only way the main binary genuinely stays free of
+# wgpu and naga — the whole point of the split.
+CARGO_BUILD = $(CARGO_ENV) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) build \
+	--profile $(CARGO_PROFILE) $(HOST_FLAG) \
+	-p lwdbg -p lwdbg-host
+
+CARGO_BUILD_GPU = $(CARGO_ENV) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) build \
+	--profile $(CARGO_PROFILE) $(HOST_FLAG) \
+	-p lwdbg-gpu --features gpu --bin lwdbg-gpu
+CARGO_TEST  = $(CARGO_ENV) CARGO_TARGET_DIR=$(TARGET_DIR) $(CARGO) test \
+	--workspace
+
+# -------------------------------------------------------------------- what
+
+# lwdbg-gpu is present only when ./configure enabled the feature. Listing it
+# here rather than special-casing it everywhere means install, uninstall,
+# strip and the manifest all pick it up for free.
+BINS     = lwdbg lwdbg-host @GPU_BIN@
+SKILL    = skills/librewolf-debugger
+MANIFEST = packaging/MANIFEST
+
+.PHONY: all build check test install install-strip uninstall clean distclean \
+        bundle dist help manifest catalog lint audit sarif dup audit-rules \
+        preflight release sbom console-log console-log-hook console-log-drives \
+        shaders shaders-verify js-test evals-browser
+
+all: build
+
+help:
+	@echo 'Targets:'
+	@echo '  all / build     build the release binaries'
+	@echo '  check           cargo test --workspace, then evals/run.sh'
+	@echo '  install         into $$(DESTDIR)$$(PREFIX)'
+	@echo '  install-strip   install, then strip the binaries'
+	@echo '  uninstall       remove exactly what install placed'
+	@echo '  bundle          multi-platform artifacts into dist/'
+	@echo '  dist            source tarball'
+	@echo '  clean           remove build artifacts for this configuration'
+	@echo '  distclean       clean, and remove Makefile, dist/ and audit/'
+	@echo ''
+	@echo 'Release gate:'
+	@echo '  preflight       everything below, one verdict. Run before release.'
+	@echo '  catalog         audit/catalog.json: which analysers apply here'
+	@echo '  lint            fmt, clippy, shellcheck, mandoc, markdown, spelling'
+	@echo '  audit           advisories, licences, unsafe, unused deps, secrets'
+	@echo '  sarif           merge every SARIF into audit/report.sarif'
+	@echo '  dup             duplicated blocks (a report, not a gate)'
+	@echo '  audit-rules     artifact rules; AUDIT_FIX=1 applies the safe fixes'
+	@echo '  sbom            audit/sbom.json, CycloneDX, from Cargo.lock'
+	@echo '  shaders         translate ssim.wgsl to every target language'
+	@echo '  shaders-verify  compile each one with the platform compiler'
+	@echo '  js-test         the JavaScript parity implementation'
+	@echo '  evals-browser   the browser-launch evals; needs an idle machine'
+	@echo ''
+	@echo 'Command log:'
+	@echo '  console-log       audit/console.log: every tool call, backfilled'
+	@echo '  console-log-hook  wire the hook so future calls log themselves'
+	@echo '  console-log-drives  volumes, devices, inode pressure'
+	@echo '  release         preflight, then bundle + checksums'
+	@echo ''
+	@echo 'Variables (override on the command line):'
+	@echo '  PREFIX=$(PREFIX)'
+	@echo '  DESTDIR=        staged install root, for packaging'
+	@echo '  BUNDLE_WHAT=    all | macos | cross | remote   (for make bundle)'
+	@echo '  CARGO_PROFILE=$(CARGO_PROFILE)   release | release-lean'
+	@echo ''
+	@echo 'Configured: target=$(HOST_PREFIX)$(CARGO_PROFILE) gpu=$(GPU) on $(UNAME)'
+
+build:
+	@echo '==> cargo build --profile $(CARGO_PROFILE) (lwdbg, lwdbg-host)'
+	cd $(SRCDIR) && $(CARGO_BUILD)
+	@if [ -n "$(GPU_BIN)" ]; then \
+		echo '==> cargo build --profile $(CARGO_PROFILE) (lwdbg-gpu, separate)'; \
+		cd $(SRCDIR) && $(CARGO_BUILD_GPU); \
+	else \
+		echo '    lwdbg-gpu not built: configure without --with-gpu'; \
+	fi
+	@for b in $(BINS); do \
+		ls -l "$(BUILT)/$$b$(EXE)" || exit 1; \
+	done
+
+check: build
+	cd $(SRCDIR) && $(CARGO_TEST)
+	@if [ -f $(SRCDIR)/evals/run.sh ]; then \
+		echo '==> evals'; \
+		LWDBG="$(BUILT)/lwdbg$(EXE)" \
+		LWDBG_SKILL="$(SRCDIR)/$(SKILL)" \
+		sh "$(SRCDIR)/evals/run.sh"; \
+	else \
+		echo 'evals/run.sh is absent; skipping'; \
+	fi
+
+test: check
+
+# ------------------------------------------------------------------ install
+#
+# Every file is placed by hand, so the manifest written at the end is exactly
+# what landed and `uninstall` never has to guess.
+
+install: build
+	@echo '==> installing into $(DESTDIR)$(PREFIX)'
+	mkdir -p "$(DESTDIR)$(BINDIR)"
+	for b in $(BINS); do \
+		cp -f "$(BUILT)/$$b$(EXE)" "$(DESTDIR)$(BINDIR)/$$b$(EXE)" || exit 1; \
+		chmod 755 "$(DESTDIR)$(BINDIR)/$$b$(EXE)" || exit 1; \
+	done
+	mkdir -p "$(DESTDIR)$(PKGDATADIR)/$(SKILL)/references"
+	cp -f "$(SRCDIR)/$(SKILL)/SKILL.md" "$(DESTDIR)$(PKGDATADIR)/$(SKILL)/SKILL.md"
+	chmod 644 "$(DESTDIR)$(PKGDATADIR)/$(SKILL)/SKILL.md"
+	for f in $(SRCDIR)/$(SKILL)/references/*.md; do \
+		[ -f "$$f" ] || continue; \
+		b=`basename "$$f"`; \
+		cp -f "$$f" "$(DESTDIR)$(PKGDATADIR)/$(SKILL)/references/$$b" || exit 1; \
+		chmod 644 "$(DESTDIR)$(PKGDATADIR)/$(SKILL)/references/$$b" || exit 1; \
+	done
+	mkdir -p "$(DESTDIR)$(PKGDATADIR)/extension"
+	for f in manifest.json background.js; do \
+		cp -f "$(SRCDIR)/extension/$$f" "$(DESTDIR)$(PKGDATADIR)/extension/$$f" || exit 1; \
+		chmod 644 "$(DESTDIR)$(PKGDATADIR)/extension/$$f" || exit 1; \
+	done
+	mkdir -p "$(DESTDIR)$(PKGDATADIR)/ssot"
+	cp -f "$(SRCDIR)/ssot/schema.sql" "$(DESTDIR)$(PKGDATADIR)/ssot/schema.sql"
+	chmod 644 "$(DESTDIR)$(PKGDATADIR)/ssot/schema.sql"
+	@if [ -f "$(SRCDIR)/doc/lwdbg.1" ]; then \
+		mkdir -p "$(DESTDIR)$(MANDIR)/man1"; \
+		cp -f "$(SRCDIR)/doc/lwdbg.1" "$(DESTDIR)$(MANDIR)/man1/lwdbg.1"; \
+		chmod 644 "$(DESTDIR)$(MANDIR)/man1/lwdbg.1"; \
+	fi
+	@$(MAKE) manifest
+	@echo '==> installed. Manifest: $(SRCDIR)/$(MANIFEST)'
+	@echo '    the skill tree is at $(PKGDATADIR)/$(SKILL)'
+
+install-strip: install
+	for b in $(BINS); do \
+		$(STRIP) "$(DESTDIR)$(BINDIR)/$$b$(EXE)" || true; \
+	done
+
+# Paths are relative to DESTDIR, so a packager can turn this straight into a
+# FreeBSD plist or an xbps INSTALL list.
+manifest:
+	mkdir -p "$(SRCDIR)/packaging"
+	: > "$(SRCDIR)/$(MANIFEST)"
+	for b in $(BINS); do \
+		echo "$(BINDIR)/$$b$(EXE)" >> "$(SRCDIR)/$(MANIFEST)"; \
+	done
+	echo "$(PKGDATADIR)/$(SKILL)/SKILL.md" >> "$(SRCDIR)/$(MANIFEST)"
+	for f in $(SRCDIR)/$(SKILL)/references/*.md; do \
+		[ -f "$$f" ] || continue; \
+		echo "$(PKGDATADIR)/$(SKILL)/references/`basename \"$$f\"`" \
+			>> "$(SRCDIR)/$(MANIFEST)"; \
+	done
+	echo "$(PKGDATADIR)/extension/manifest.json" >> "$(SRCDIR)/$(MANIFEST)"
+	echo "$(PKGDATADIR)/extension/background.js" >> "$(SRCDIR)/$(MANIFEST)"
+	echo "$(PKGDATADIR)/ssot/schema.sql" >> "$(SRCDIR)/$(MANIFEST)"
+	@if [ -f "$(SRCDIR)/doc/lwdbg.1" ]; then \
+		echo "$(MANDIR)/man1/lwdbg.1" >> "$(SRCDIR)/$(MANIFEST)"; \
+	fi
+	@sort "$(SRCDIR)/$(MANIFEST)" > "$(SRCDIR)/$(MANIFEST).s" && \
+		mv -f "$(SRCDIR)/$(MANIFEST).s" "$(SRCDIR)/$(MANIFEST)"
+	@awk 'END { print "    " NR " files" }' "$(SRCDIR)/$(MANIFEST)"
+
+# Removes the manifest's files, then the directories left empty. rmdir without
+# -p and with `|| true`, so a directory still holding somebody else's files is
+# kept rather than forced.
+uninstall:
+	@if [ ! -f "$(SRCDIR)/$(MANIFEST)" ]; then \
+		echo 'no $(MANIFEST): run `make manifest` with the same PREFIX first' >&2; \
+		exit 1; \
+	fi
+	@echo '==> removing the files listed in $(MANIFEST), under $(DESTDIR)/'
+	while read -r f; do \
+		[ -n "$$f" ] || continue; \
+		rm -f "$(DESTDIR)$$f"; \
+	done < "$(SRCDIR)/$(MANIFEST)"
+	-rmdir "$(DESTDIR)$(PKGDATADIR)/$(SKILL)/references" 2>/dev/null || true
+	-rmdir "$(DESTDIR)$(PKGDATADIR)/$(SKILL)" 2>/dev/null || true
+	-rmdir "$(DESTDIR)$(PKGDATADIR)/skills" 2>/dev/null || true
+	-rmdir "$(DESTDIR)$(PKGDATADIR)/extension" 2>/dev/null || true
+	-rmdir "$(DESTDIR)$(PKGDATADIR)/ssot" 2>/dev/null || true
+	-rmdir "$(DESTDIR)$(PKGDATADIR)" 2>/dev/null || true
+	@echo '==> done. The store under ~/.local/share/lwdbg is left alone: it'
+	@echo '    holds captured traces and the local CA, which are user data.'
+
+# --------------------------------------------------------------------- misc
+
+bundle:
+	sh "$(SRCDIR)/scripts/bundle.sh" $(BUNDLE_WHAT)
+
+# pax is the POSIX archiver and reads its file list from stdin; GNU/bsd tar's
+# `-T -` is the fallback for a system that ships tar but not pax.
+dist:
+	@mkdir -p "$(SRCDIR)/dist"
+	@v=`sed -n 's/^version = "\(.*\)"$$/\1/p' "$(SRCDIR)/Cargo.toml" | head -1`; \
+	n="lwdbg-$$v"; \
+	cd "$(SRCDIR)" && find . -type f \
+		! -path './target/*' ! -path './dist/*' ! -path './.git/*' \
+		! -name Makefile ! -name '.DS_Store' | sort | \
+		( if command -v pax >/dev/null 2>&1; then \
+			pax -w -x ustar -f "dist/$$n.tar"; \
+		  else \
+			tar -cf "dist/$$n.tar" -T -; \
+		  fi ) && \
+	echo "dist/$$n.tar"
+
+
+# ============================================================ shaders
+#
+# shaders/ssim.wgsl is the only hand-written shader here. SPIR-V, MSL, HLSL
+# and GLSL are translated from it, so there is no second copy to keep in
+# agreement — and WGSL is the only one of the five that every backend can be
+# reached *from*, which is why the source is in it.
+
+shaders:
+	@if [ -z "$(GPU_BIN)" ]; then \
+		echo '    SKIP: configure with --with-gpu to build the shader tools'; \
+	else \
+		"$(BUILT)/$(GPU_BIN)$(EXE)" emit --out "$(SRCDIR)/$(AUDIT)/shaders"; \
+	fi
+
+# The step that separates "naga produced HLSL" from "HLSL a compiler accepts".
+# A language with no compiler on this machine is reported as skipped with the
+# reason; only a shader a compiler *rejects* fails.
+shaders-verify:
+	@if [ -z "$(GPU_BIN)" ]; then \
+		echo '    SKIP: configure with --with-gpu to verify shaders'; \
+	else \
+		"$(BUILT)/$(GPU_BIN)$(EXE)" verify \
+			--scratch "$(SRCDIR)/$(AUDIT)/shaders"; \
+	fi
+
+# The JavaScript parity implementation asserts the same golden vectors the
+# Rust tests do, so the browser fallback cannot drift from the reference.
+# The browser-launch evals, which need an idle machine. Separate from the
+# gate for the reason recorded in evals/suite.json: run inside preflight on
+# this 8 GiB box they fail from swap pressure, not from a defect.
+evals-browser:
+	cd $(SRCDIR) && LWDBG="$(BUILT)/lwdbg$(EXE)" \
+		LWDBG_SKILL="$(SRCDIR)/$(SKILL)" \
+		LWDBG_EVAL_BROWSER=1 sh evals/run.sh
+
+js-test:
+	@if command -v node >/dev/null 2>&1; then \
+		cd $(SRCDIR) && node --test gpu/js/parity.test.mjs; \
+	else \
+		echo '    SKIP: node is not installed'; \
+	fi
+
+# ========================================================= the release gate
+#
+# `preflight` is the refuelling stop: one command, one verdict, and every skip
+# printed with its reason. Each stage below also runs on its own.
+
+AUDIT = audit
+
+# semgrep reads ~/.semgrep/settings.yml, which is root-owned 0600 on this
+# machine; pointing it at a writable path is the difference between a scan and
+# a stack trace.
+SEMGREP_ENV = SEMGREP_SETTINGS_FILE=$(SRCDIR)/$(AUDIT)/semgrep-settings.yml
+
+catalog:
+	@mkdir -p "$(SRCDIR)/$(AUDIT)"
+	sh "$(SRCDIR)/tools/catalog.sh" "$(SRCDIR)/$(AUDIT)/catalog.json"
+
+lint:
+	@mkdir -p "$(SRCDIR)/$(AUDIT)"
+	@echo '==> cargo fmt --check'
+	cd $(SRCDIR) && $(CARGO) fmt --all --check
+	@echo '==> cargo clippy -D warnings'
+	cd $(SRCDIR) && $(CARGO_ENV) CARGO_TARGET_DIR=$(TARGET_DIR) \
+		$(CARGO) clippy --workspace --all-targets -- -D warnings
+	@# The run above resolves lwdbg-gpu without its feature — correct for the
+	@# main binary, and it means translate.rs and the lwdbg-gpu binary are
+	@# never looked at. A gate that builds code it does not lint is not a
+	@# gate, so when the feature is configured the GPU crate gets its own
+	@# pass, in its own invocation, for the same feature-unification reason
+	@# the build has two.
+	@if [ -n "$(GPU_BIN)" ]; then \
+		echo '==> cargo clippy -D warnings (lwdbg-gpu, with the feature)'; \
+		cd $(SRCDIR) && $(CARGO_ENV) CARGO_TARGET_DIR=$(TARGET_DIR) \
+			$(CARGO) clippy -p lwdbg-gpu --features gpu --all-targets \
+			-- -D warnings; \
+	fi
+	@echo '==> shellcheck'
+	cd $(SRCDIR) && shellcheck -s sh configure scripts/*.sh evals/run.sh tools/*.sh
+	@echo '==> mandoc'
+	@if [ -f "$(SRCDIR)/doc/lwdbg.1" ]; then \
+		mandoc -T lint "$(SRCDIR)/doc/lwdbg.1" 2>&1 \
+		| grep -v 'mandoc.db' | grep -v 'referenced manual not found' \
+		| grep . && exit 1 || echo '    clean'; \
+	fi
+	@echo '==> markdownlint'
+	@if command -v markdownlint >/dev/null 2>&1; then \
+		cd $(SRCDIR) && markdownlint README.md $(SKILL)/SKILL.md \
+			$(SKILL)/references/*.md packaging/windows/README.md \
+			&& echo '    clean'; \
+	else echo '    SKIP: markdownlint is not installed'; fi
+	@echo '==> codespell'
+	@if command -v codespell >/dev/null 2>&1; then \
+		cd $(SRCDIR) && codespell && echo '    clean'; \
+	else echo '    SKIP: codespell is not installed'; fi
+	@echo '==> actionlint'
+	@if [ ! -d "$(SRCDIR)/.github/workflows" ]; then \
+		echo '    SKIP: no workflows to check'; \
+	elif command -v actionlint >/dev/null 2>&1; then \
+		cd $(SRCDIR) && actionlint && echo '    clean'; \
+	else echo '    SKIP: actionlint is not installed'; fi
+	@echo '==> eslint (the WebExtension)'
+	@if [ ! -f "$(SRCDIR)/eslint.config.mjs" ]; then \
+		echo '    SKIP: no eslint config'; \
+	elif command -v eslint >/dev/null 2>&1; then \
+		cd $(SRCDIR) && eslint extension/ && echo '    clean'; \
+	else echo '    SKIP: eslint is not installed'; fi
+
+audit:
+	@mkdir -p "$(SRCDIR)/$(AUDIT)"
+	@echo '==> cargo audit'
+	cd $(SRCDIR) && $(CARGO) audit
+	@echo '==> cargo deny'
+	cd $(SRCDIR) && $(CARGO) deny check
+	@echo '==> cargo machete'
+	cd $(SRCDIR) && $(CARGO) machete
+	@echo '==> gitleaks (working tree)'
+	cd $(SRCDIR) && gitleaks dir . --no-banner --config .gitleaks.toml \
+		--report-format sarif --report-path $(AUDIT)/gitleaks.sarif
+	@if [ -d "$(SRCDIR)/.git" ]; then \
+		echo '==> gitleaks (history)'; \
+		cd $(SRCDIR) && gitleaks git . --no-banner --config .gitleaks.toml \
+			--report-format sarif --report-path $(AUDIT)/gitleaks-git.sarif; \
+	else echo '    SKIP: history scan, this is not a git repository'; fi
+	@echo '==> semgrep'
+	@if command -v semgrep >/dev/null 2>&1; then \
+		cd $(SRCDIR) && touch $(AUDIT)/semgrep-settings.yml && \
+		$(SEMGREP_ENV) semgrep scan --config=p/rust --config=p/secrets \
+			--sarif --output=$(AUDIT)/semgrep.sarif --metrics=off \
+			--exclude=target --exclude=dist --exclude=audit --quiet; \
+	else echo '    SKIP: semgrep is not installed'; fi
+	@echo '==> cargo geiger (unsafe, in the crate that terminates TLS)'
+	@# geiger builds the whole dependency tree in its own target directory,
+	@# which is several minutes. Its answer here is stable — 0/0 for both own
+	@# crates — so the recorded result is reused unless AUDIT_GEIGER is set.
+	@# A gate nobody runs because it takes twenty minutes is not a gate.
+	@if [ -n "$(AUDIT_GEIGER)" ] || [ ! -s "$(SRCDIR)/$(AUDIT)/geiger-proxy.txt" ]; then \
+		cd $(SRCDIR)/proxy && CARGO_TARGET_DIR=$(TARGET_DIR)-geiger \
+			$(CARGO) geiger --output-format Ascii 2>/dev/null \
+			> "$(SRCDIR)/$(AUDIT)/geiger-proxy.txt" || true; \
+	else \
+		echo "    reusing $(AUDIT)/geiger-proxy.txt; AUDIT_GEIGER=1 to re-run"; \
+	fi
+	@grep -E 'lwdbg-(proxy|ssot)' "$(SRCDIR)/$(AUDIT)/geiger-proxy.txt" | head -2 \
+		|| echo "    (see $(AUDIT)/geiger-proxy.txt)"
+
+sarif:
+	@mkdir -p "$(SRCDIR)/$(AUDIT)"
+	@echo '==> clippy -> SARIF'
+	@if command -v clippy-sarif >/dev/null 2>&1; then \
+		cd $(SRCDIR) && $(CARGO_ENV) CARGO_TARGET_DIR=$(TARGET_DIR) \
+			$(CARGO) clippy --workspace --all-targets --message-format=json \
+			2>/dev/null | clippy-sarif > $(AUDIT)/clippy.sarif; \
+	else echo '    SKIP: cargo install clippy-sarif'; fi
+	@echo '==> shellcheck -> SARIF'
+	@if command -v shellcheck-sarif >/dev/null 2>&1; then \
+		cd $(SRCDIR) && shellcheck -s sh -f json configure scripts/*.sh \
+			evals/run.sh tools/*.sh 2>/dev/null \
+			| shellcheck-sarif > $(AUDIT)/shellcheck.sarif; \
+	else echo '    SKIP: cargo install shellcheck-sarif'; fi
+	cd $(SRCDIR) && sh tools/sarif-merge.sh $(AUDIT)/report.sarif \
+		$(AUDIT)/clippy.sarif $(AUDIT)/shellcheck.sarif \
+		$(AUDIT)/gitleaks.sarif $(AUDIT)/semgrep.sarif
+
+dup:
+	cd $(SRCDIR) && sh tools/dup.sh $(DUP_WINDOW)
+
+# Every tool call this project has ever made, with timing, verdict,
+# permission decision, byte counts and which volume it touched.
+#
+# Not part of `preflight`: it is a record, not a check, and a 3.6 MB write on
+# every gate run would be noise. `console-log-hook` wires it so future calls
+# land without being asked for.
+console-log:
+	cd $(SRCDIR) && sh tools/console-log.sh backfill
+	cd $(SRCDIR) && sh tools/console-log.sh matrix
+
+console-log-hook:
+	cd $(SRCDIR) && sh tools/console-log.sh install-hook
+
+console-log-drives:
+	cd $(SRCDIR) && sh tools/console-log.sh drives
+
+audit-rules:
+	@cd $(SRCDIR) && if [ -n "$(AUDIT_FIX)" ]; then \
+		sh tools/audit_rules.sh --fix; \
+	else \
+		sh tools/audit_rules.sh; \
+	fi
+
+# CycloneDX from Cargo.lock, with awk rather than a plugin so a release does
+# not depend on one more tool being installed. The fields are the ones a
+# consumer needs to match an advisory to a component.
+sbom:
+	@mkdir -p "$(SRCDIR)/$(AUDIT)"
+	@cd $(SRCDIR) && awk '\
+		/^\[\[package\]\]/ { if (n != "") print n "\t" v; n=""; v=""; next } \
+		/^name = / { gsub(/^name = "|"$$/, ""); n=$$0; next } \
+		/^version = / { gsub(/^version = "|"$$/, ""); v=$$0; next } \
+		END { if (n != "") print n "\t" v }' Cargo.lock \
+	| sort -u \
+	| awk -F'\t' 'BEGIN { \
+		print "{"; print "  \"bomFormat\": \"CycloneDX\","; \
+		print "  \"specVersion\": \"1.5\","; print "  \"version\": 1,"; \
+		print "  \"components\": ["; sep="" } \
+		{ printf "%s    {\"type\":\"library\",\"name\":\"%s\",\"version\":\"%s\",\"purl\":\"pkg:cargo/%s@%s\"}", \
+			sep, $$1, $$2, $$1, $$2; sep=",\n" } \
+		END { print ""; print "  ]"; print "}" }' \
+	> $(AUDIT)/sbom.json
+	@printf '    %s components -> %s\n' \
+		"`grep -c purl \"$(SRCDIR)/$(AUDIT)/sbom.json\"`" "$(AUDIT)/sbom.json"
+
+# One verdict. Every stage runs; a skip prints its reason, because a tool that
+# is absent or has nothing to scan is not a pass.
+preflight:
+	@mkdir -p "$(SRCDIR)/$(AUDIT)"
+	@echo '=============================================================='
+	@echo ' preflight: the stop before the round trip'
+	@echo '=============================================================='
+	@$(MAKE) catalog
+	@$(MAKE) lint
+	@$(MAKE) audit
+	@$(MAKE) sarif
+	@$(MAKE) audit-rules
+	@$(MAKE) shaders-verify
+	@$(MAKE) js-test
+	@$(MAKE) dup
+	@$(MAKE) sbom
+	@$(MAKE) check
+	@echo ''
+	@echo "==> summary -> $(AUDIT)/SUMMARY.md"
+	@cd $(SRCDIR) && { \
+		echo '# preflight'; echo ''; \
+		echo "Generated `date -u +%Y-%m-%dT%H:%M:%SZ` on $(UNAME), gpu=$(GPU)."; \
+		echo ''; \
+		echo '| check | result |'; \
+		echo '| --- | --- |'; \
+		echo "| SARIF open findings | `jq '[.runs[].results[]?|select((.suppressions//[])|length==0)]|length' $(AUDIT)/report.sarif 2>/dev/null || echo n/a` |"; \
+		echo "| SARIF suppressed | `jq '[.runs[].results[]?|select((.suppressions//[])|length>0)]|length' $(AUDIT)/report.sarif 2>/dev/null || echo n/a` |"; \
+		echo "| analysers usable here | `jq '[.[]|select(.status==\"ok\")]|length' $(AUDIT)/catalog.json 2>/dev/null || echo n/a` |"; \
+		echo "| analysers not installed | `jq '[.[]|select(.status==\"not-installed\")]|length' $(AUDIT)/catalog.json 2>/dev/null || echo n/a` |"; \
+		echo "| analysers with nothing to scan | `jq '[.[]|select(.status==\"nothing-to-scan\")]|length' $(AUDIT)/catalog.json 2>/dev/null || echo n/a` |"; \
+		echo "| SBOM components | `grep -c purl $(AUDIT)/sbom.json 2>/dev/null || echo n/a` |"; \
+		echo ''; \
+		echo 'Each stage prints its own skips with the reason.'; \
+	} > $(AUDIT)/SUMMARY.md
+	@cat "$(SRCDIR)/$(AUDIT)/SUMMARY.md"
+	@echo 'preflight: PASS'
+
+release: preflight
+	@echo '==> version consistency'
+	@v=`sed -n 's/^version = "\(.*\)"$$/\1/p' "$(SRCDIR)/Cargo.toml" | head -1`; \
+	printf '    Cargo.toml version %s\n' "$$v"
+	@$(MAKE) bundle BUNDLE_WHAT=macos
+	@echo '==> checksums'
+	@cd $(SRCDIR)/dist && find . -type f ! -name 'SHA256SUMS' \
+		-exec shasum -a 256 {} ';' > SHA256SUMS && cat SHA256SUMS
+	@echo ''
+	@echo "release artifacts in dist/, audit in $(AUDIT)/"
+
+clean:
+	rm -rf "$(BUILT)"
+	rm -f "$(SRCDIR)/Makefile.tmp"*
+
+distclean: clean
+	rm -rf "$(SRCDIR)/dist"
+	rm -f "$(SRCDIR)/Makefile"

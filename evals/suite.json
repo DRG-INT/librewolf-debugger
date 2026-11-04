@@ -1,0 +1,373 @@
+{
+  "$comment": [
+    "Eval suite for lwdbg. Two kinds of case, deliberately separated.",
+    "",
+    "`mechanical` cases run a command and check its output with jq-style",
+    "assertions. They are deterministic, need no model, and are what run in",
+    "CI. Each one asserts something that has actually been wrong at some",
+    "point in this tool's history.",
+    "",
+    "`trigger` cases are prompts. They measure whether the skill's",
+    "description fires when it should and stays quiet when it should not,",
+    "which is a property of the description text and cannot be checked by",
+    "running a binary. Run them through the harness and record the verdict.",
+    "",
+    "`requires` names what must be present. A case whose requirement is",
+    "absent is reported as SKIP, never as PASS: a suite that silently",
+    "skips is a suite that reports green on a broken tool.",
+    "",
+    "`requires: idle-machine` marks a case that launches a browser and times a",
+    "network request. Those are measurements, not checks: inside `make",
+    "preflight` the machine is compiling Rust, and on an 8 GiB box that means",
+    "swap at 90% \u2014 where Marionette did not bind within 90 seconds and a TTFB",
+    "came out at 587ms against curl's 20ms. Both are machine load, not",
+    "defects, and a gate that goes red for load is as useless as one that",
+    "goes green for a missing tool.",
+    "",
+    "They are skipped unless LWDBG_EVAL_BROWSER=1, which `make evals-browser`",
+    "sets. The skip prints its reason, so the coverage gap is visible."
+  ],
+  "mechanical": [
+    {
+      "id": "doctor-json",
+      "why": "doctor is the first call in any unfamiliar environment, so it must never fail to produce parseable output, even when checks fail.",
+      "requires": [],
+      "cmd": [
+        "doctor",
+        "--json"
+      ],
+      "allow_nonzero_exit": true,
+      "assert": [
+        {
+          "jq": "type",
+          "eq": "array"
+        },
+        {
+          "jq": "length > 3",
+          "eq": true
+        },
+        {
+          "jq": "all(.[]; has(\"name\") and has(\"ok\") and has(\"detail\"))",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "id": "detect-finds-engines",
+      "why": "The engine table is the basis of every transport decision. A detector that misses the symlinked LibreWolf, or that claims Goanna has a transport, breaks everything downstream.",
+      "requires": [],
+      "cmd": [
+        "detect",
+        "--json"
+      ],
+      "assert": [
+        {
+          "jq": "type",
+          "eq": "array"
+        },
+        {
+          "jq": "any(.[]; .engine == \"gecko\")",
+          "eq": true
+        },
+        {
+          "jq": "all(.[]; .engine == \"goanna\" | not) or all(.[]; select(.engine == \"goanna\") | .has_debug_transport == false)",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "id": "transport-names-reject-cdp",
+      "why": "Gecko has no CDP. A transport parser that accepted it would send a client at a port nothing speaks.",
+      "requires": [],
+      "cmd": [
+        "attach",
+        "--transport",
+        "cdp",
+        "--port",
+        "9222"
+      ],
+      "expect_failure": true,
+      "assert_stderr_contains": "CDP is a Blink protocol"
+    },
+    {
+      "id": "measure-curl-three-runs",
+      "why": "Three runs and a median is the rule the whole tool rests on. A measurement that reports one run is unreportable.",
+      "requires": [
+        "network"
+      ],
+      "cmd": [
+        "measure",
+        "https://example.com/",
+        "--json"
+      ],
+      "assert": [
+        {
+          "jq": ".runs | length",
+          "eq": 3
+        },
+        {
+          "jq": ".median_us_ttfb != null",
+          "eq": true
+        },
+        {
+          "jq": ".via",
+          "eq": "curl"
+        }
+      ]
+    },
+    {
+      "id": "measure-browser-agrees-with-curl",
+      "why": "This is the cross-check that catches a mis-instrumented browser path. It found the timeOrigin anchoring bug, where loadEventEnd under-reported a 6.0s load as 0.714s.",
+      "requires": [
+        "network",
+        "gecko-browser",
+        "idle-machine"
+      ],
+      "cmd": [
+        "measure",
+        "https://example.com/",
+        "--via",
+        "marionette",
+        "--browser",
+        "{{GECKO}}",
+        "--runs",
+        "3",
+        "--json"
+      ],
+      "assert": [
+        {
+          "jq": ".runs | map(select(.error == null)) | length >= 1",
+          "eq": true
+        },
+        {
+          "jq": ".median_us_ttfb > 0",
+          "eq": true
+        },
+        {
+          "jq": "[.runs[].us_load] | map(select(. != null)) | all(. > 0)",
+          "eq": true
+        }
+      ],
+      "cross_check": {
+        "cmd": [
+          "measure",
+          "https://example.com/",
+          "--json"
+        ],
+        "rule": "browser median TTFB is not implausibly faster than curl's",
+        "direction": "not_faster_than",
+        "min_ratio": 0.5,
+        "why_directional": "A ratio in both directions is only meaningful on an idle machine, and preflight runs this while cargo is compiling: measured 587ms against curl's 20ms inside the gate, purely from CPU contention. A gate that goes red for machine load is as useless as one that goes green for a missing tool. The bug class worth catching is under-reporting \u2014 a browser cannot legitimately be faster than the wire \u2014 so the assertion is directional. Over-reporting under load is expected and is reported as a note, not a failure."
+      },
+      "why_one_run_is_enough_here": "The three-runs-and-a-median rule is about what gets reported to a person: one observation is not a property of a server. This case asks a different question \u2014 whether the browser path is instrumented correctly, i.e. not under-reporting \u2014 and one successful run answers it. Requiring two was unmet on this 8 GiB machine with swap at 91%, where Marionette did not bind within 90 seconds for two of three launches. That is the machine, not the code, and `lwdbg measure` still defaults to three runs and still refuses to call one run reportable."
+    },
+    {
+      "id": "parity-identical-is-one",
+      "why": "A parity engine that cannot score an image against itself as 1.0 cannot be trusted on a real pair. Also pins that the reported backend is never the literal string 'auto'.",
+      "requires": [
+        "two-renders"
+      ],
+      "cmd": [
+        "parity",
+        "--render-a",
+        "{{RENDER_A}}",
+        "--render-b",
+        "{{RENDER_A}}",
+        "--json"
+      ],
+      "assert": [
+        {
+          "jq": ".[0].parity.ssim > 0.999",
+          "eq": true
+        },
+        {
+          "jq": ".[0].parity.phash_hamming",
+          "eq": 0
+        },
+        {
+          "jq": ".[0].parity.backend | IN(\"gpu\", \"cpu\")",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "id": "parity-gpu-and-cpu-agree",
+      "why": "The CPU path is the reference and the shader is checked against it. A divergence means the WGSL is wrong, and would otherwise be invisible.",
+      "requires": [
+        "two-renders",
+        "gpu"
+      ],
+      "cmd": [
+        "parity",
+        "--render-a",
+        "{{RENDER_A}}",
+        "--render-b",
+        "{{RENDER_B}}",
+        "--backend",
+        "gpu",
+        "--json"
+      ],
+      "cross_check": {
+        "cmd": [
+          "parity",
+          "--render-a",
+          "{{RENDER_A}}",
+          "--render-b",
+          "{{RENDER_B}}",
+          "--backend",
+          "cpu",
+          "--json"
+        ],
+        "rule": "ssim values within 1e-4",
+        "tolerance_abs": 0.0001
+      }
+    },
+    {
+      "id": "screenshot-is-not-zero-bytes",
+      "why": "A screenshot path that silently produces an empty file makes every parity score meaningless.",
+      "requires": [
+        "network",
+        "gecko-browser",
+        "idle-machine"
+      ],
+      "cmd": [
+        "measure",
+        "https://example.com/",
+        "--via",
+        "marionette",
+        "--browser",
+        "{{GECKO}}",
+        "--runs",
+        "1",
+        "--screenshot",
+        "--json"
+      ],
+      "assert": [
+        {
+          "jq": ".runs[0].render_id != null",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "id": "ssot-compression-view",
+      "why": "The question that started this tool was whether gzip was the bottleneck. The answer has to be a query, not a recollection.",
+      "requires": [
+        "store-with-exchanges"
+      ],
+      "cmd": [
+        "ssot",
+        "compression"
+      ],
+      "assert": [
+        {
+          "jq": "type",
+          "eq": "array"
+        },
+        {
+          "jq": "all(.[]; has(\"wire_bytes\") and has(\"decoded_bytes\"))",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "id": "adapters-list-is-honest-about-inferred-paths",
+      "why": "An install path that was guessed must say so. Reporting a guess as a fact is how a tool loses its usefulness as a source.",
+      "requires": [],
+      "cmd": [
+        "adapters",
+        "list",
+        "--json"
+      ],
+      "assert": [
+        {
+          "jq": "any(.[]; .path_verified == false)",
+          "eq": true
+        },
+        {
+          "jq": "all(.[]; has(\"state\") and has(\"target\"))",
+          "eq": true
+        },
+        {
+          "jq": "any(.[]; .id == \"agents\")",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "id": "proxy-scope-does-not-leak-to-lookalike-hosts",
+      "why": "`--only-host example.com` must cover cdn.example.com and must NOT cover notexample.com. Getting this wrong decrypts traffic the user did not consent to.",
+      "requires": [],
+      "unit_test": "lwdbg-proxy server::tests",
+      "note": "covered by the crate's own tests; listed here so the suite records the property, not just the code"
+    },
+    {
+      "id": "live-refuses-a-mutating-command-by-default",
+      "why": "The extension acts on the user's real session. A refusal that still reached the browser would be decoration.",
+      "requires": [],
+      "unit_test": "lwdbg-host tests/bridge.rs::a_mutating_command_is_refused_without_reaching_the_browser"
+    },
+    {
+      "id": "launch-refuses-a-foreign-profile",
+      "why": "launch writes devtools.debugger.prompt-connection=false and privacy.resistFingerprinting=false. Writing those into a profile the user browses with removes protections they chose this browser for.",
+      "requires": [],
+      "unit_test": "lwdbg-transports launch::tests::refuses_a_directory_it_did_not_create"
+    }
+  ],
+  "trigger": [
+    {
+      "id": "should-fire-page-slow",
+      "prompt": "This page takes forever to load, can you find out why? https://example.com/",
+      "expect": "fire",
+      "why": "The core use case. If the description does not fire here it does not fire anywhere."
+    },
+    {
+      "id": "should-fire-already-open-browser",
+      "prompt": "My browser has been open for three days. Can you see what tabs I have without restarting it?",
+      "expect": "fire",
+      "why": "The one capability no transport provides, and the reason the extension layer exists."
+    },
+    {
+      "id": "should-fire-compression",
+      "prompt": "Is gzip actually being applied to this response, or is the server lying in the header?",
+      "expect": "fire",
+      "why": "Wire-vs-decoded byte accounting is the thing this tool can answer and a header read cannot."
+    },
+    {
+      "id": "should-fire-cross-browser",
+      "prompt": "Does this page render the same in LibreWolf as in Firefox?",
+      "expect": "fire",
+      "why": "Parity."
+    },
+    {
+      "id": "should-fire-android",
+      "prompt": "Can you debug Firefox on my Android phone over USB?",
+      "expect": "fire",
+      "why": "adb plus the RDP client."
+    },
+    {
+      "id": "must-not-fire-web-search",
+      "prompt": "What is the current population of Hungary?",
+      "expect": "quiet",
+      "why": "This tool is not a search engine and not a scraper. A description that fires here turns every factual question into a browser launch."
+    },
+    {
+      "id": "must-not-fire-scraping",
+      "prompt": "Download every page on example.com for me.",
+      "expect": "quiet",
+      "why": "Not a crawler. Firing here would also encourage hammering a stranger's server."
+    },
+    {
+      "id": "must-not-fire-generic-http",
+      "prompt": "Write me a Python function that does an HTTP GET with retries.",
+      "expect": "quiet",
+      "why": "A coding question that merely mentions HTTP. Firing here is the classic over-trigger."
+    },
+    {
+      "id": "must-not-fire-css-question",
+      "prompt": "Why is my flexbox not centering?",
+      "expect": "quiet",
+      "why": "A CSS question needs no measurement, no browser launch and no proxy."
+    }
+  ]
+}

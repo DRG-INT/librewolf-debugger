@@ -1,0 +1,50 @@
+[package]
+name = "lwdbg-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["gpu"]
+# The CPU path is always built. This feature only adds the wgpu backend, so a
+# machine with no usable adapter — a CI box, the Void host — can build and run
+# the whole tool without it.
+gpu = [
+    "dep:wgpu",
+    "dep:bytemuck",
+    "dep:pollster",
+    # Translation and the lwdbg-gpu binary. Kept behind the same feature so
+    # the main binary links neither naga nor clap.
+    "dep:naga",
+    "dep:clap",
+    "dep:serde_json",
+]
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+png = "0.17"
+wgpu = { version = "27", optional = true, default-features = false, features = ["metal", "vulkan", "dx12", "wgsl"] }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+pollster = { version = "0.4", optional = true }
+# Already in the tree as a wgpu dependency; named directly for the *-out
+# backends, which wgpu does not enable.
+naga = { version = "27", optional = true, default-features = false, features = [
+    "wgsl-in", "wgsl-out", "spv-out", "msl-out", "hlsl-out", "glsl-out",
+] }
+clap = { version = "4", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
+
+# The separate binary. `required-features` rather than a cfg guard: cargo then
+# simply does not build it without the feature, instead of building an empty
+# one.
+# The golden-vector test reads testdata/vectors.json, which the JavaScript
+# side asserts against too. A dev dependency, because the library itself has
+# no use for JSON.
+[dev-dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "lwdbg-gpu"
+path = "src/bin/lwdbg-gpu.rs"
+required-features = ["gpu"]

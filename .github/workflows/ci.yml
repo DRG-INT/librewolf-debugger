@@ -1,0 +1,136 @@
+name: ci
+
+# One job runs the same gate a developer runs: `make preflight`. Nothing here
+# reimplements a check, so CI and the local run cannot drift apart.
+#
+# The GPU backend is off: a runner has no usable adapter, and the CPU path is
+# the reference implementation that the shader is tested against anyway.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history, which needs more than the default
+          # single-commit fetch.
+          fetch-depth: 0
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component clippy,rustfmt
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Install the analysis tools
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          # From apt: the linters that are packaged. The rest are cargo
+          # installs that the cache above keeps between runs.
+          #
+          # Note: a comment line here must not begin with the name of the
+          # shell linter, because that is how its inline directives are
+          # written and actionlint rejects an unparsable one.
+          sudo apt-get install -y -qq --no-install-recommends \
+            shellcheck mandoc jq sqlite3
+          for t in cargo-audit cargo-deny cargo-machete clippy-sarif \
+                   shellcheck-sarif sarif-fmt
+          do
+            command -v "$t" >/dev/null 2>&1 || cargo install --locked "$t"
+          done
+          # cargo-geiger is slow to build and its answer for this repo is
+          # recorded in the audit directory; preflight tolerates its absence.
+          npm install -g markdownlint-cli
+          pipx install codespell || pip install --user codespell
+
+      - name: Install gitleaks
+        run: |
+          set -eu
+          v=8.21.2
+          curl -fsSL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz"
+          tar -C /usr/local/bin -xzf /tmp/gitleaks.tar.gz gitleaks
+          gitleaks version
+
+      - name: configure
+        run: ./configure --prefix=/usr/local --without-gpu
+
+      - name: preflight
+        run: make preflight
+
+      - name: Staged install round trip
+        run: |
+          set -eu
+          make DESTDIR="${RUNNER_TEMP}/stage" install
+          # Every installed file must appear in the manifest, and the manifest
+          # must contain nothing that was not installed. uninstall then has to
+          # leave the tree empty.
+          ( cd "${RUNNER_TEMP}/stage" && find . -type f | sed 's|^\.||' | sort ) \
+            > "${RUNNER_TEMP}/installed.txt"
+          sort packaging/MANIFEST > "${RUNNER_TEMP}/manifest.txt"
+          diff "${RUNNER_TEMP}/installed.txt" "${RUNNER_TEMP}/manifest.txt"
+          make DESTDIR="${RUNNER_TEMP}/stage" uninstall
+          left=$(find "${RUNNER_TEMP}/stage" -type f | wc -l)
+          test "$left" -eq 0 || { echo "uninstall left $left file(s)"; exit 1; }
+
+      - name: The installed binary finds its own data
+        run: |
+          set -eu
+          make DESTDIR="${RUNNER_TEMP}/stage2" install
+          env -u LWDBG_SKILL "${RUNNER_TEMP}/stage2/usr/local/bin/lwdbg" \
+            adapters list --json | jq -e 'length > 0' > /dev/null
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: audit/report.sarif
+        continue-on-error: true
+
+      - name: Upload the audit directory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit
+          path: audit/
+          retention-days: 14
+
+  posix-shell:
+    # The scripts must work under dash, not just under whatever sh the
+    # developer's machine provides. On macOS /bin/sh is bash in disguise, so
+    # this is the only place the POSIX claim is actually tested.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: dash -n every script
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends dash
+          for f in configure scripts/*.sh evals/run.sh tools/*.sh; do
+            echo "-- $f"
+            dash -n "$f"
+          done

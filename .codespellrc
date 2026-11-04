@@ -1,0 +1,12 @@
+[codespell]
+skip = ./target,./dist,./.git,Cargo.lock,./audit
+# Each of these is a real token in this codebase, not a typo. Listed with the
+# reason so a future reader does not "fix" one of them:
+#
+#   te  — the HTTP hop-by-hop header `TE` (RFC 9110 §10.1.4), stripped by the
+#         proxy along with Connection, Upgrade and the rest. Not "the".
+#   fo  — a base64 test vector. "f", "fo", "foo" are the RFC 4648 padding
+#         cases, and the two-character one is exactly the interesting case.
+#   nd  — the mdoc macro `.Nd` in doc/lwdbg.1.
+ignore-words-list = te,fo,nd
+quiet-level = 2

@@ -1,0 +1,23 @@
+[package]
+name = "lwdbg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "lwdbg"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+lwdbg-ssot.workspace = true
+lwdbg-proxy.workspace = true
+lwdbg-transports.workspace = true
+lwdbg-gpu.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "process"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

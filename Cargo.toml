@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["ssot", "proxy", "transports", "gpu", "host", "cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/peter/librewolf-debugger"
+
+[workspace.dependencies]
+# Internal crates carry a version as well as a path: a path-only
+# dependency cannot be published, and cargo-deny reports it as a
+# wildcard. Declared here so the version lives in one place.
+lwdbg-ssot = { path = "ssot", version = "0.1.0" }
+lwdbg-proxy = { path = "proxy", version = "0.1.0" }
+lwdbg-transports = { path = "transports", version = "0.1.0" }
+lwdbg-gpu = { path = "gpu", version = "0.1.0", default-features = false }
+
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["formatting", "macros"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# For a machine that cannot afford the release profile's link. Thin LTO plus
+# wgpu and naga is the peak-memory moment of this build: on an 8 GiB machine
+# it was measured stalling with rustc at 0% CPU and swap at 88%.
+#
+# Inherits release, then gives up LTO and splits codegen so the peak is the
+# size of one unit rather than the whole crate graph. The binary is a little
+# larger and a little slower; it exists at all, which the other one did not.
+[profile.release-lean]
+inherits = "release"
+lto = false
+codegen-units = 16

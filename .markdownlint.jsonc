@@ -1,0 +1,23 @@
+{
+  // The reference documents are prose for a reader, not a rendered website.
+  // Rules that exist for HTML output are off; rules that catch real mistakes
+  // in a document somebody has to trust are on.
+  "default": true,
+
+  // Tables and measured output make lines long, and wrapping a table ruins it.
+  "MD013": { "line_length": 100, "tables": false, "code_blocks": false },
+
+  // A document that starts with a heading other than h1 is fine here: these
+  // are included references, not standalone pages.
+  "MD041": false,
+
+  // Duplicate headings are legitimate across sections ("Verifying" appears in
+  // more than one reference).
+  "MD024": { "siblings_only": true },
+
+  // Inline HTML is used for the lwdbg:begin/end markers in AGENTS.md blocks.
+  "MD033": false,
+
+  // Bare URLs appear in measured output and in install commands.
+  "MD034": false
+}

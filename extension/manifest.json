@@ -1,0 +1,22 @@
+{
+  "manifest_version": 2,
+  "name": "lwdbg live bridge",
+  "version": "0.1.0",
+  "description": "Lets lwdbg read and drive this already-running browser session over a native messaging host on loopback. No network access of its own.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "lwdbg-live@localhost",
+      "strict_min_version": "115.0"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  },
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "nativeMessaging",
+    "<all_urls>"
+  ]
+}

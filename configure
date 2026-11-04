@@ -1,0 +1,402 @@
+#!/bin/sh
+# Generate Makefile from Makefile.in.
+#
+# Hand-written POSIX sh. No autoconf, no m4: there is nothing here that needs
+# a 30000-line generated script, and a from-source build should not require a
+# generator to be installed first.
+#
+# This writes the whole Makefile rather than a config.mk that the Makefile
+# includes, because the include directive is the one place make genuinely
+# splits: FreeBSD/NetBSD bmake wants `.include "config.mk"`, GNU make wants
+# `include config.mk`, and there is no spelling both accept. Substituting into
+# a template sidesteps the dialect entirely.
+#
+# Deliberately avoided throughout: `local` (not in POSIX), `echo -n`,
+# `$'...'`, arrays, `[[`, `+=`. Variable names are prefixed instead of scoped.
+
+set -eu
+
+srcdir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+self=$(basename -- "$0")
+
+# ---------------------------------------------------------------- defaults
+
+prefix=/usr/local
+bindir=
+datarootdir=
+mandir=
+sysconfdir=
+cargo=
+host=
+want_gpu=auto
+target_dir=
+
+uname_s=$(uname -s 2>/dev/null || echo unknown)
+
+usage() {
+    cat <<EOF
+Usage: ./$self [options]
+
+Directories (conventional meanings; DESTDIR is honoured at install time):
+  --prefix=DIR          installation prefix          [$prefix]
+  --bindir=DIR          executables                  [PREFIX/bin]
+  --datarootdir=DIR     architecture-independent     [PREFIX/share]
+  --mandir=DIR          manual pages                 [DATAROOTDIR/man]
+  --sysconfdir=DIR      configuration                [PREFIX/etc]
+
+Build:
+  --with-cargo=PATH     cargo to use                 [from PATH]
+  --host=TRIPLE         cross-compile for TRIPLE     [native]
+  --target-dir=DIR      cargo target directory       [cargo's own default]
+  --with-gpu            force the wgpu backend on
+  --without-gpu         force it off
+                        default: on for Darwin, off elsewhere
+  -h, --help            this text
+
+Examples:
+  ./$self --prefix=/usr --mandir=/usr/share/man
+  ./$self --host=x86_64-unknown-linux-musl --without-gpu
+  DESTDIR=/tmp/stage make install
+EOF
+}
+
+# ---------------------------------------------------------------- arguments
+
+for cfg_arg
+do
+    case $cfg_arg in
+    --prefix=*)       prefix=${cfg_arg#*=} ;;
+    --bindir=*)       bindir=${cfg_arg#*=} ;;
+    --datarootdir=*)  datarootdir=${cfg_arg#*=} ;;
+    --datadir=*)      datarootdir=${cfg_arg#*=} ;;
+    --mandir=*)       mandir=${cfg_arg#*=} ;;
+    --sysconfdir=*)   sysconfdir=${cfg_arg#*=} ;;
+    --with-cargo=*)   cargo=${cfg_arg#*=} ;;
+    --host=*)         host=${cfg_arg#*=} ;;
+    --target=*)       host=${cfg_arg#*=} ;;
+    --target-dir=*)   target_dir=${cfg_arg#*=} ;;
+    --with-gpu)       want_gpu=yes ;;
+    --without-gpu)    want_gpu=no ;;
+    --enable-gpu)     want_gpu=yes ;;
+    --disable-gpu)    want_gpu=no ;;
+    -h|--help)        usage; exit 0 ;;
+    # Accepted and ignored so a packaging framework's boilerplate does not
+    # abort the build. ports and xbps-src both pass several of these.
+    --build=*|--infodir=*|--libdir=*|--libexecdir=*|--localstatedir=*)
+                      ;;
+    --disable-option-checking|--disable-dependency-tracking|--disable-silent-rules)
+                      ;;
+    *)
+        printf '%s: unknown option: %s\n' "$self" "$cfg_arg" >&2
+        printf 'try ./%s --help\n' "$self" >&2
+        exit 2
+        ;;
+    esac
+done
+
+: "${bindir:=$prefix/bin}"
+: "${datarootdir:=$prefix/share}"
+: "${mandir:=$datarootdir/man}"
+: "${sysconfdir:=$prefix/etc}"
+
+# ----------------------------------------------------------------- probing
+
+cfg_found=''
+cfg_missing=''
+
+have() {
+    # have <name> [command-to-check]
+    if command -v "${2:-$1}" >/dev/null 2>&1; then
+        cfg_where=$(command -v "${2:-$1}")
+        printf '  %-14s %s\n' "$1" "$cfg_where"
+        cfg_found="$cfg_found $1"
+        return 0
+    fi
+    printf '  %-14s not found\n' "$1"
+    cfg_missing="$cfg_missing $1"
+    return 1
+}
+
+printf 'Configuring lwdbg for %s\n\n' "$uname_s"
+printf 'Required:\n'
+
+if [ -n "$cargo" ]; then
+    if [ ! -x "$cargo" ]; then
+        printf '  %-14s %s is not executable\n' cargo "$cargo" >&2
+        exit 1
+    fi
+    printf '  %-14s %s\n' cargo "$cargo"
+else
+    have cargo || :
+    cargo=$(command -v cargo 2>/dev/null || true)
+fi
+have rustc || :
+
+# Four dependencies compile C and there is no pure-Rust path for all of them:
+# ring (TLS), libsqlite3-sys (bundled SQLite), blake3, zstd-sys. A build
+# without a C compiler fails deep inside a build script with a confusing
+# message, so it is checked here instead.
+cfg_cc=''
+for cfg_try in "${CC:-}" cc clang gcc
+do
+    [ -n "$cfg_try" ] || continue
+    if command -v "$cfg_try" >/dev/null 2>&1; then
+        cfg_cc=$(command -v "$cfg_try")
+        break
+    fi
+done
+if [ -n "$cfg_cc" ]; then
+    printf '  %-14s %s\n' "C compiler" "$cfg_cc"
+else
+    printf '  %-14s not found\n' "C compiler"
+    cfg_missing="$cfg_missing cc"
+fi
+
+printf '\nOptional:\n'
+have pkg-config || have pkgconf pkgconf || :
+have certutil   || :
+have adb        || :
+have rsync      || :
+have ssh        || :
+have jq         || :
+have sqlite3    || :
+have strip      || :
+have docker     || have podman || :
+
+# -------------------------------------------------------------- hard errors
+
+cfg_fatal=''
+case " $cfg_found " in *" cargo "*) ;; *) cfg_fatal="$cfg_fatal cargo" ;; esac
+case " $cfg_found " in *" rustc "*) ;; *) cfg_fatal="$cfg_fatal rustc" ;; esac
+case " $cfg_missing " in *" cc "*) cfg_fatal="$cfg_fatal cc" ;; *) ;; esac
+
+if [ -n "$cfg_fatal" ]; then
+    printf '\n%s: missing required tools:%s\n\n' "$self" "$cfg_fatal" >&2
+    case "$uname_s" in
+    FreeBSD) printf '  pkg install rust\n' >&2 ;;
+    Linux)
+        printf '  Void:   xbps-install -S rust cargo base-devel\n' >&2
+        printf '  Debian: apt install cargo rustc build-essential\n' >&2
+        ;;
+    Darwin)  printf '  brew install rustup && rustup-init\n' >&2
+             printf '  xcode-select --install   # for the C compiler\n' >&2 ;;
+    *)       printf '  see https://rustup.rs\n' >&2 ;;
+    esac
+    exit 1
+fi
+
+# ------------------------------------------------------------ feature logic
+
+if [ "$want_gpu" = auto ]; then
+    # wgpu is kept on only where it is actually used. Metal is here; a Linux
+    # or FreeBSD vantage host measuring page loads has no use for a shader,
+    # and the CPU path is the reference implementation in any case.
+    case "$uname_s" in
+    Darwin) want_gpu=yes ;;
+    *)      want_gpu=no ;;
+    esac
+fi
+
+# The cli no longer has a gpu feature: it links the CPU reference only, and
+# the GPU work is a separate binary built by a separate cargo invocation. So
+# --with-gpu now decides whether that second binary exists, nothing more.
+if [ "$want_gpu" = yes ]; then
+    cargo_features=''
+    # The shader and GPU work lives in its own binary, so the tool that
+    # measures page loads never links wgpu or naga. It is built and installed
+    # only when the feature is on.
+    gpu_bin='lwdbg-gpu'
+    # Naming the package as well: lwdbg's own `gpu` feature turns on
+    # lwdbg-gpu/gpu through the dependency, and cargo unifies features across
+    # the build, so adding the package is what makes its `required-features`
+    # binary actually get built.
+    gpu_pkg='-p lwdbg-gpu'
+else
+    cargo_features='--no-default-features'
+    gpu_bin=''
+    gpu_pkg=''
+fi
+
+# Physical memory, in MiB. Each system names it differently and none of the
+# three is POSIX, so all are tried and an unknown answer is simply not acted
+# on — a guess here would be worse than no guard.
+cfg_ram=0
+case "$uname_s" in
+Darwin)
+    cfg_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+    cfg_ram=$((cfg_bytes / 1024 / 1024))
+    ;;
+FreeBSD|NetBSD|OpenBSD)
+    cfg_bytes=$(sysctl -n hw.physmem 2>/dev/null || echo 0)
+    cfg_ram=$((cfg_bytes / 1024 / 1024))
+    ;;
+Linux)
+    if [ -r /proc/meminfo ]; then
+        cfg_kb=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || echo 0)
+        cfg_ram=$((cfg_kb / 1024))
+    fi
+    ;;
+esac
+
+# The GPU feature pulls wgpu and naga in, and linking them under the
+# workspace's thin LTO is the peak-memory moment of the whole build. Measured
+# on this 8 GiB machine: rustc sat at 0% CPU with swap at 10.8 GB of 12.3,
+# and the link never finished. The build without the feature completes.
+#
+# 12 GiB is the threshold because 8 demonstrably fails and 16 demonstrably
+# works; between them is untested, so the message says "may" rather than
+# "will".
+cfg_lowmem=no
+if [ "$want_gpu" = yes ] && [ "$cfg_ram" -gt 0 ] && [ "$cfg_ram" -lt 12288 ]; then
+    cfg_lowmem=yes
+fi
+
+# Cross builds put artifacts one directory deeper, and the install rules need
+# to know which.
+if [ -n "$host" ]; then
+    host_flag="--target $host"
+    # cargo nests a cross build one level deeper. The profile name is
+    # appended by the Makefile, which is what lets CARGO_PROFILE be changed
+    # on the command line without re-running configure.
+    host_prefix="$host/"
+else
+    host_flag=''
+    host_prefix=''
+fi
+
+# An executable suffix is needed for a Windows cross build.
+case "$host" in
+*windows*) exe_ext='.exe' ;;
+*)         exe_ext='' ;;
+esac
+
+# The Makefile has to know where the binaries land, so the target directory is
+# resolved here rather than left to cargo. Order: an explicit --target-dir, then
+# whatever .cargo/config.toml already says, then the conventional ./target.
+#
+# That config file exists in this repo on purpose: the archive volume starves
+# rustc (one crate took over 13 minutes there, against 2m44s for the whole
+# workspace on the internal disk), so it redirects artifacts to fast storage.
+# Honouring it keeps `make` and a bare `cargo build` using the same directory.
+if [ -z "$target_dir" ] && [ -f "$srcdir/.cargo/config.toml" ]; then
+    target_dir=$(sed -n \
+        's/^[[:space:]]*target-dir[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' \
+        "$srcdir/.cargo/config.toml" | head -1)
+fi
+: "${target_dir:=$srcdir/target}"
+
+cfg_strip=$(command -v strip 2>/dev/null || echo ':')
+
+# ------------------------------------------------------------- substitution
+
+[ -f "$srcdir/Makefile.in" ] || {
+    printf '%s: %s/Makefile.in is missing\n' "$self" "$srcdir" >&2
+    exit 1
+}
+
+# Escape anything sed would treat specially in a replacement. Paths with a
+# space are legal and this repo lives on a volume under /Volumes, so this is
+# not hypothetical.
+sed_escape() {
+    printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+
+sed \
+    -e "s|@PREFIX@|$(sed_escape "$prefix")|g" \
+    -e "s|@BINDIR@|$(sed_escape "$bindir")|g" \
+    -e "s|@DATAROOTDIR@|$(sed_escape "$datarootdir")|g" \
+    -e "s|@MANDIR@|$(sed_escape "$mandir")|g" \
+    -e "s|@SYSCONFDIR@|$(sed_escape "$sysconfdir")|g" \
+    -e "s|@CARGO@|$(sed_escape "$cargo")|g" \
+    -e "s|@CARGO_FEATURES@|$(sed_escape "$cargo_features")|g" \
+    -e "s|@GPU_BIN@|$(sed_escape "$gpu_bin")|g" \
+    -e "s|@GPU_PKG@|$(sed_escape "$gpu_pkg")|g" \
+    -e "s|@HOST_FLAG@|$(sed_escape "$host_flag")|g" \
+    -e "s|@HOST_PREFIX@|$(sed_escape "$host_prefix")|g" \
+    -e "s|@EXE@|$(sed_escape "$exe_ext")|g" \
+    -e "s|@TARGET_DIR@|$(sed_escape "$target_dir")|g" \
+    -e "s|@SRCDIR@|$(sed_escape "$srcdir")|g" \
+    -e "s|@UNAME@|$(sed_escape "$uname_s")|g" \
+    -e "s|@STRIP@|$(sed_escape "$cfg_strip")|g" \
+    -e "s|@GPU@|$(sed_escape "$want_gpu")|g" \
+    "$srcdir/Makefile.in" > "$srcdir/Makefile.tmp$$"
+mv -f "$srcdir/Makefile.tmp$$" "$srcdir/Makefile"
+
+# ---------------------------------------------------------------- summary
+
+printf '\nConfiguration:\n'
+printf '  %-14s %s\n' prefix       "$prefix"
+printf '  %-14s %s\n' bindir       "$bindir"
+printf '  %-14s %s\n' datarootdir  "$datarootdir"
+printf '  %-14s %s\n' mandir       "$mandir"
+printf '  %-14s %s\n' target       "${host:-native}"
+printf '  %-14s %s\n' "target dir"  "$target_dir"
+printf '  %-14s %s\n' "GPU backend" "$want_gpu"
+if [ -n "$gpu_bin" ]; then
+    printf '  %-14s %s\n' "extra binary" "$gpu_bin (shader translation, GPU parity)"
+fi
+
+if [ "$cfg_lowmem" = yes ]; then
+    printf '  %-14s %s MiB\n' "memory" "$cfg_ram"
+    printf '\nWARNING: the GPU feature is on and this machine has %s MiB of RAM.\n' "$cfg_ram"
+    printf 'Linking wgpu and naga under thin LTO is the build'"'"'s peak-memory\n'
+    printf 'moment; on an 8 GiB machine it was measured stalling with rustc at\n'
+    printf '0%% CPU and swap at 88%%, and the link never completed.\n\n'
+    printf 'Either build without it:\n'
+    printf '    ./%s --without-gpu %s\n\n' "$self" "--prefix=$prefix"
+    printf 'or lower the memory peak:\n'
+    printf '    make CARGO_PROFILE=release-lean\n\n'
+    printf 'Nothing is lost functionally: the CPU path is the reference\n'
+    printf 'implementation that the shader is tested against, so lwdbg parity\n'
+    printf 'still works and reports backend: cpu.\n'
+fi
+
+printf '\nFeatures that will NOT work in this configuration:\n'
+cfg_any_gap=no
+case " $cfg_missing " in
+*" certutil "*)
+    printf '  - lwdbg proxy ca-install: certutil is missing, so the proxy CA\n'
+    printf '    cannot be written into a Gecko profile cert9.db.\n'
+    case "$uname_s" in
+    FreeBSD) printf '      pkg install nss          # ships bin/certutil\n' ;;
+    Linux)   printf '      Debian: apt install libnss3-tools\n'
+             printf '      Void:   xbps-query -Rs nss   # confirm which package has it\n' ;;
+    Darwin)  printf '      brew install nss\n' ;;
+    esac
+    cfg_any_gap=yes
+    ;;
+esac
+case " $cfg_missing " in
+*" adb "*)
+    printf '  - lwdbg android *: adb is missing.\n'
+    case "$uname_s" in
+    FreeBSD) printf '      pkg install android-tools\n' ;;
+    Linux)   printf '      Debian: apt install android-tools-adb\n'
+             printf '      Void:   xbps-query -Rs android\n' ;;
+    Darwin)  printf '      brew install --cask android-platform-tools\n' ;;
+    esac
+    cfg_any_gap=yes
+    ;;
+esac
+case " $cfg_missing " in
+*" jq "*|*" sqlite3 "*)
+    printf '  - make check: the eval runner needs jq and sqlite3.\n'
+    cfg_any_gap=yes
+    ;;
+esac
+case " $cfg_missing " in
+*" rsync "*|*" ssh "*)
+    printf '  - make bundle (remote targets): needs ssh and rsync.\n'
+    cfg_any_gap=yes
+    ;;
+esac
+if ! command -v docker >/dev/null 2>&1 && ! command -v podman >/dev/null 2>&1; then
+    printf '  - make bundle (container targets): no container runtime.\n'
+    cfg_any_gap=yes
+fi
+[ "$cfg_any_gap" = no ] && printf '  (none)\n'
+
+printf '\nWrote %s/Makefile. Next:\n' "$srcdir"
+printf '  make\n'
+printf '  make check\n'
+printf '  make install          # or: make DESTDIR=/tmp/stage install\n'

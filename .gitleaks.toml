@@ -1,0 +1,59 @@
+# gitleaks configuration.
+#
+# Two jobs: stop the default rules firing on build output, and add one rule for
+# the shape that actually leaked in this project.
+
+[extend]
+useDefault = true
+
+# `gitleaks dir` does not read .gitignore, so it walks target/ and dist/ and
+# finds the string "PRIVATE KEY" compiled into the `pem` crate's .rmeta. That
+# is a crate's own test data inside a build artifact, not a committed secret,
+# and it was the only finding in a 294 MB scan.
+[allowlist]
+description = "build output and generated reports are not source"
+paths = [
+  '''^target/''',
+  '''^dist/''',
+  '''^audit/''',
+  '''\.rmeta$''',
+  '''\.rlib$''',
+]
+
+# The real incident here: an ssh password pasted in prose as `pass:VALUE`. No
+# default rule catches that — it is not an API-key shape — so it gets one.
+#
+# Go's RE2 has no negative lookahead, so the placeholder exclusions live in the
+# rule's allowlist rather than in the pattern. That is the idiomatic split
+# anyway: the rule says what a password looks like, the allowlist says which
+# ones are documentation.
+[[rules]]
+id = "prose-password-assignment"
+description = "A password written inline as pass:/password:/pwd: with a literal value"
+regex = '''(?i)\b(?:pass|passwd|password|pwd)\s*[:=]\s*[^\s'"]{8,}'''
+tags = ["password", "prose"]
+
+[rules.allowlist]
+regexTarget = "line"
+regexes = [
+  '''(?i)REDACTED''',
+  '''(?i)CHANGEME''',
+  '''(?i)EXAMPLE''',
+  '''(?i)your[-_ ]?pass''',
+  '''(?i)xxxx''',
+  '''\$\{?SSH_PASS''',
+  '''(?i)password:\}''',
+  '''(?i)pass(word)?\s*[:=]\s*<''',
+  # A Rust binding, not a secret: `let mut pass = enc.begin_compute_pass(..)`
+  # matched the rule because the value is long and unquoted.
+  '''\blet\s+(mut\s+)?(pass|pwd|passwd|password)\b''',
+  # Any value that is plainly an expression — a call or a field access —
+  # is code. A real password does not contain `(` or `.` followed by more
+  # identifier, and the default rules still cover key shapes in source.
+  '''\b(?:pass|passwd|password|pwd)\s*[:=]\s*[^\s'\"]*[(.]''',
+]
+paths = [
+  '''^scripts/setup-ssh\.sh$''',
+  '''^skills/librewolf-debugger/references/''',
+  '''^packaging/''',
+]

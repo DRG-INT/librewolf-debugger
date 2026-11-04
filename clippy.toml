@@ -1,0 +1,23 @@
+# Clippy configuration.
+#
+# The thresholds are raised rather than the lints silenced, and each raise
+# says why. A blanket `#![allow]` at crate level would hide the next genuine
+# instance, which is the whole value of the lint.
+
+# `browser::Opts` and `launch::LaunchSpec` are configuration records passed
+# whole; they legitimately have many fields, and splitting them would only
+# move the arity somewhere else.
+too-many-arguments-threshold = 8
+
+# The transport clients return `(Value, Vec<Value>, Option<String>)` from the
+# three driver functions. Naming that tuple would be clearer, and the dup pass
+# in this same release is where it gets fixed — not by raising the threshold
+# forever, so this stays at the default and the refactor happens instead.
+
+# Reference documents and error messages quote real measurements with long
+# literals; that is evidence, not clutter.
+literal-representation-threshold = 16384
+
+# Error strings in this codebase deliberately explain what to do next, so they
+# run long.
+too-many-lines-threshold = 160

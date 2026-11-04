@@ -1,0 +1,6 @@
+# The repository lives on an archive volume whose random-write latency starves
+# rustc: a single crate took over 13 minutes there at ~0.6% CPU. Build
+# artifacts therefore go to the internal disk. Source stays on the volume;
+# only the target directory moves.
+[build]
+target-dir = "/Users/peter/.cache/lwdbg-target"

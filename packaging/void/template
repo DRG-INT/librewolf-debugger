@@ -1,0 +1,55 @@
+# Template file for 'lwdbg'
+#
+# For void-packages/srcpkgs/lwdbg/template. A skeleton: version, distfiles and
+# checksum still have to be filled in, and the dependency names below carry a
+# verification command rather than a promise, because xbps splits packages
+# differently from Debian and I have not run these on the box.
+pkgname=lwdbg
+version=0.1.0
+revision=1
+build_style=cargo
+# A workspace, so the two binaries are named. --no-default-features drops the
+# wgpu backend: it would pull a graphics stack in for a tool whose CPU path is
+# the reference implementation.
+make_install_args="--path cli --path host --no-default-features"
+hostmakedepends="pkg-config"
+makedepends=""
+# Run time, and only for `lwdbg proxy ca-install`, which needs certutil(1).
+# VERIFY on the machine before trusting this line:
+#     xbps-query -Rs nss
+#     xbps-query -Rf nss | grep certutil
+# If certutil is split out, change this to whichever package owns it.
+depends="nss"
+short_desc="Measure and debug browsers via a caching proxy and a debug store"
+maintainer="you <you@example.org>"
+license="Apache-2.0, MIT"
+homepage="https://github.com/peter/librewolf-debugger"
+distfiles="https://github.com/peter/librewolf-debugger/archive/refs/tags/v${version}.tar.gz"
+checksum=0000000000000000000000000000000000000000000000000000000000000000
+
+# The binary looks for its skill tree at the path baked in at build time.
+export LWDBG_DATADIR=/usr/share/lwdbg
+
+post_install() {
+	vman doc/lwdbg.1
+	vlicense LICENSE-MIT 2>/dev/null || true
+	vlicense LICENSE-APACHE 2>/dev/null || true
+
+	vmkdir usr/share/lwdbg/skills/librewolf-debugger/references
+	vcopy skills/librewolf-debugger/SKILL.md \
+		usr/share/lwdbg/skills/librewolf-debugger
+	vcopy "skills/librewolf-debugger/references/*.md" \
+		usr/share/lwdbg/skills/librewolf-debugger/references
+
+	vmkdir usr/share/lwdbg/extension
+	vcopy extension/manifest.json usr/share/lwdbg/extension
+	vcopy extension/background.js usr/share/lwdbg/extension
+
+	vmkdir usr/share/lwdbg/ssot
+	vcopy ssot/schema.sql usr/share/lwdbg/ssot
+}
+
+# Optional at run time, not declared as a dependency because the Android layer
+# is one feature of many and `lwdbg doctor` reports its absence with the
+# install command:
+#     xbps-query -Rs android     # find whichever package carries adb
